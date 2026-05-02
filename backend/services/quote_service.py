@@ -1,16 +1,28 @@
 """Quote service: real market data via yfinance for Taiwan stocks."""
 
 import asyncio
+import dataclasses
 import re
-from datetime import datetime
+from datetime import datetime, time as dtime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import yfinance as yf
 from loguru import logger
 
-from core.cache import quote_cache, stock_info_cache, history_cache, signal_cache, rate_limit_cache
+from core.cache import quote_cache, stock_info_cache, history_cache, signal_cache, rate_limit_cache, raw_df_cache
 from services.signal_engine import MarketData
 from services.twse_service import TWSEService
+
+_TAIPEI_TZ = ZoneInfo("Asia/Taipei")
+
+
+def is_market_open() -> bool:
+    """Return True if Taiwan stock market is currently open (Mon-Fri 09:00-13:30 Taipei time)."""
+    now = datetime.now(tz=_TAIPEI_TZ)
+    if now.weekday() >= 5:
+        return False
+    return dtime(9, 0) <= now.time() <= dtime(13, 30)
 
 
 # Common Taiwan stocks and ETFs for search suggestions.
@@ -240,8 +252,38 @@ class QuoteService:
         return results[:20]
 
     async def get_quote(self, stock_id: str) -> dict:
-        """Get real stock quote via yfinance (daily data)."""
+        """Get stock quote. Uses TWSE MIS real-time API during market hours, yfinance otherwise."""
         cache_key = f"quote:{stock_id}"
+
+        # During market hours: use TWSE MIS intraday API (5s TTL handled inside twse_service)
+        if is_market_open():
+            market = self.get_stock_market(stock_id)
+            intraday = await self._twse_service.get_intraday_quote(stock_id, market)
+            if intraday and intraday.get("current_price"):
+                current_price = intraday["current_price"]
+                prev_close = intraday.get("prev_close") or current_price
+                open_p = intraday.get("open") or current_price
+                high_p = intraday.get("high") or current_price
+                low_p = intraday.get("low") or current_price
+                change = round(current_price - prev_close, 2)
+                change_pct = round((change / prev_close * 100) if prev_close else 0, 2)
+                return {
+                    "stock_id": stock_id,
+                    "stock_name": self.get_stock_name(stock_id),
+                    "current_price": current_price,
+                    "open": open_p,
+                    "high": high_p,
+                    "low": low_p,
+                    "close": current_price,
+                    "volume": intraday.get("volume", 0),
+                    "change": change,
+                    "change_percent": change_pct,
+                    "prev_close": prev_close,
+                    "updated_at": datetime.now().isoformat(),
+                    "is_intraday": True,
+                    "trade_time": intraday.get("trade_time", ""),
+                }
+
         if cache_key in quote_cache:
             return quote_cache[cache_key]
 
@@ -281,6 +323,8 @@ class QuoteService:
                 "change_percent": change_pct,
                 "prev_close": prev_close,
                 "updated_at": datetime.now().isoformat(),
+                "is_intraday": False,
+                "trade_time": "",
             }
             quote_cache[cache_key] = quote
             return quote
@@ -313,22 +357,25 @@ class QuoteService:
 
     async def get_market_data(self, stock_id: str) -> MarketData:
         """
-        Build MarketData for signal engine using real daily OHLCV data.
+        Build MarketData for signal engine.
 
-        Since yfinance doesn't provide real-time tick/order-book data,
-        we use daily data to derive the signals:
-        - daily closes → minute_closes (signal engine uses them for RSI, MACD, KD)
-        - daily highs/lows → minute_highs/minute_lows
-        - volume ratio → approximate outer/inner volume
-        - price action → approximate tick direction
+        Historical daily OHLCV (for RSI/MACD/KD) is cached in raw_df_cache (30min).
+        During market hours, current price/OHLCV is overridden with TWSE MIS real-time data.
         """
         cache_key = f"market_data:{stock_id}"
-        if cache_key in signal_cache:
+
+        # Non-market hours: use full signal_cache (60s TTL)
+        if not is_market_open() and cache_key in signal_cache:
             return signal_cache[cache_key]
 
         try:
-            # Fetch 6 months of daily data for sufficient indicator calculation
-            df = _download_with_fallback(stock_id, period="6mo", interval="1d")
+            # Historical data: cached 30min to avoid repeated yfinance 6mo fetches
+            raw_key = f"raw_df:{stock_id}"
+            df = raw_df_cache.get(raw_key)
+            if df is None:
+                df = _download_with_fallback(stock_id, period="6mo", interval="1d")
+                if not df.empty:
+                    raw_df_cache[raw_key] = df
             if df.empty or len(df) < 5:
                 logger.warning(f"Insufficient data for market analysis: {stock_id}")
                 return self._empty_market_data(stock_id)
@@ -411,7 +458,25 @@ class QuoteService:
                 sox_prev_close=sox_data.get("prev_close") if sox_data else None,
                 market_timestamp=datetime.now(),
             )
-            signal_cache[cache_key] = market_data
+
+            # During market hours: override current price/OHLCV with TWSE MIS real-time data
+            if is_market_open():
+                mkt = self.get_stock_market(stock_id)
+                intraday = await self._twse_service.get_intraday_quote(stock_id, mkt)
+                if intraday and intraday.get("current_price"):
+                    market_data = dataclasses.replace(
+                        market_data,
+                        current_price=intraday["current_price"],
+                        open_price=intraday.get("open") or market_data.open_price,
+                        high_price=intraday.get("high") or market_data.high_price,
+                        low_price=intraday.get("low") or market_data.low_price,
+                        volume=intraday.get("volume") or market_data.volume,
+                        market_timestamp=datetime.now(),
+                    )
+
+            # Cache only outside market hours; during market hours rely on raw_df_cache + intraday
+            if not is_market_open():
+                signal_cache[cache_key] = market_data
             return market_data
 
         except Exception as e:

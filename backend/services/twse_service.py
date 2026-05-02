@@ -6,13 +6,14 @@ from datetime import datetime
 import httpx
 from loguru import logger
 
-from core.cache import twse_cache
+from core.cache import twse_cache, intraday_cache
 
 
 class TWSEService:
     """Fetches institutional and margin data from TWSE open APIs."""
 
     BASE_URL = "https://www.twse.com.tw"
+    MIS_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
     TIMEOUT = 10.0
 
     def __init__(self):
@@ -20,6 +21,67 @@ class TWSEService:
             "User-Agent": "Mozilla/5.0",
             "Accept": "application/json",
         }
+
+    async def get_intraday_quote(self, stock_id: str, market: str = "TWSE") -> dict | None:
+        """Fetch real-time intraday quote from TWSE MIS API (盤中即時報價).
+
+        Only meaningful during market hours (Mon-Fri 09:00-13:30 Taipei time).
+        Returns None if data is unavailable or market is not trading.
+        """
+        cache_key = f"intraday:{stock_id}"
+        cached = intraday_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        ex = "otc" if market == "TPEX" else "tse"
+        ex_ch = f"{ex}_{stock_id}.tw"
+        url = f"{self.MIS_URL}?ex_ch={ex_ch}&json=1&delay=0"
+        headers = {**self._headers, "Referer": "https://mis.twse.com.tw/stock/fibest.html"}
+
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(url, headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
+
+            items = data.get("msgArray", [])
+            if not items:
+                return None
+
+            item = items[0]
+
+            def _f(key: str) -> float | None:
+                v = item.get(key, "-")
+                if v in ("-", "", None):
+                    return None
+                try:
+                    return float(v)
+                except (ValueError, TypeError):
+                    return None
+
+            current = _f("z")   # 最新成交價
+            prev_close = _f("y")  # 昨收
+            if current is None:
+                current = prev_close  # 開盤前或無成交時用昨收
+
+            if current is None:
+                return None
+
+            result = {
+                "current_price": round(current, 2),
+                "open": _f("o"),
+                "high": _f("h"),
+                "low": _f("l"),
+                "prev_close": round(prev_close, 2) if prev_close else None,
+                "volume": int(str(item.get("v", "0")).replace(",", "") or 0),
+                "trade_time": item.get("t", ""),
+            }
+            intraday_cache[cache_key] = result
+            return result
+
+        except Exception as e:
+            logger.warning(f"TWSE MIS intraday fetch failed for {stock_id}: {e}")
+            return None
 
     async def get_institutional_data(self, stock_id: str) -> dict:
         """

@@ -22,3 +22,9 @@ rate_limit_cache: TTLCache = TTLCache(maxsize=100, ttl=300)
 
 # TWSE institutional/margin data cache: max 500, 12-hour TTL (updates once after market close)
 twse_cache: TTLCache = TTLCache(maxsize=500, ttl=43200)
+
+# Intraday real-time quote cache: max 500, 5-second TTL (TWSE MIS API during market hours)
+intraday_cache: TTLCache = TTLCache(maxsize=500, ttl=5)
+
+# Raw historical dataframe cache: max 200, 30-minute TTL (avoids repeated yfinance 6mo fetches)
+raw_df_cache: TTLCache = TTLCache(maxsize=200, ttl=1800)
