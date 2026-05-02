@@ -3,7 +3,7 @@
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import {
-  LayoutDashboard, Briefcase, BarChart2, Settings, ChevronLeft, ChevronRight, X,
+  LayoutDashboard, Briefcase, BarChart2, Settings, ChevronLeft, ChevronRight, X, Zap,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -14,6 +14,7 @@ import { FavoriteStocks } from '@/components/search/FavoriteStocks'
 
 const navItems = [
   { label: '儀表板', href: '/dashboard', icon: LayoutDashboard },
+  { label: '當沖監測', href: '/daytrade', icon: Zap },
   { label: '模擬倉', href: '/portfolio', icon: Briefcase },
   { label: '歷史統計', href: '/statistics', icon: BarChart2 },
   { label: '設定', href: '/settings', icon: Settings },

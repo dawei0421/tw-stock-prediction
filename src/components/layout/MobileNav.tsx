@@ -2,11 +2,12 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { LayoutDashboard, Briefcase, BarChart2, Settings } from 'lucide-react'
+import { LayoutDashboard, Briefcase, BarChart2, Settings, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 const navItems = [
   { label: '首頁', href: '/dashboard', icon: LayoutDashboard },
+  { label: '當沖', href: '/daytrade', icon: Zap },
   { label: '模擬倉', href: '/portfolio', icon: Briefcase },
   { label: '統計', href: '/statistics', icon: BarChart2 },
   { label: '設定', href: '/settings', icon: Settings },
